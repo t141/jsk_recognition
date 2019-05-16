@@ -466,7 +466,11 @@ namespace jsk_pcl_ros
     }
 
     std::string out_file = save_dir_ + "/mesh.obj";
-    if (integrate_color_ && n_textures_ != 0)
+    if (integrate_color_ && n_textures_ != 0 && cameras_.size() == 0)
+    {
+      NODELET_WARN("No texture recorded. Just save polygon");
+    }
+    if (integrate_color_ && n_textures_ != 0 && cameras_.size() > 0)
     {
       pcl::TextureMesh texture_mesh;
       if (n_textures_ > 0)
@@ -501,7 +505,11 @@ namespace jsk_pcl_ros
     }
 
     std::string out_file = save_dir_ + "/mesh.obj";
-    if (integrate_color_ && n_textures_ != 0)
+    if (integrate_color_ && n_textures_ != 0 && cameras_.size() == 0)
+    {
+      NODELET_WARN("No texture recorded. Just save polygon");
+    }
+    if (integrate_color_ && n_textures_ != 0 && cameras_.size() > 0)
     {
       pcl::TextureMesh texture_mesh;
       if (n_textures_ > 0)
