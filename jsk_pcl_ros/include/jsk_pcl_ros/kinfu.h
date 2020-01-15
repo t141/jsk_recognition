@@ -55,6 +55,7 @@
 #include <std_srvs/Empty.h>
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/PointCloud2.h>
+#include <geometry_msgs/PoseStamped.h>
 #include <jsk_rviz_plugins/OverlayText.h>
 #include <jsk_pcl_ros/tf_listener_singleton.h>
 #include <tf/transform_broadcaster.h>
@@ -82,6 +83,13 @@ namespace jsk_pcl_ros
       sensor_msgs::CameraInfo, sensor_msgs::Image> SyncPolicy;
     typedef message_filters::sync_policies::ApproximateTime<
       sensor_msgs::CameraInfo, sensor_msgs::Image, sensor_msgs::Image> SyncPolicyWithColor;
+    typedef message_filters::sync_policies::ApproximateTime<
+      sensor_msgs::CameraInfo, sensor_msgs::Image, geometry_msgs::PoseStamped
+      > SyncPolicyWithPose;
+    typedef message_filters::sync_policies::ApproximateTime<
+      sensor_msgs::CameraInfo, sensor_msgs::Image, sensor_msgs::Image, geometry_msgs::PoseStamped
+      > SyncPolicyWithColorAndPose;
+    
     typedef jsk_pcl_ros::KinfuConfig Config;
 
     Kinfu(): ConnectionBasedNodelet(), frame_idx_(0) {}
@@ -126,6 +134,7 @@ namespace jsk_pcl_ros
     std::string fixed_frame_id_;
     int n_textures_;
     float volume_size_;
+    bool use_pose_;
 
     int frame_idx_;
     std::string save_dir_;
@@ -138,8 +147,13 @@ namespace jsk_pcl_ros
     message_filters::Subscriber<sensor_msgs::CameraInfo> sub_camera_info_;
     message_filters::Subscriber<sensor_msgs::Image> sub_depth_;
     message_filters::Subscriber<sensor_msgs::Image> sub_color_;
+    message_filters::Subscriber<geometry_msgs::PoseStamped> sub_pose_;
     boost::shared_ptr<message_filters::Synchronizer<SyncPolicy> > sync_;
     boost::shared_ptr<message_filters::Synchronizer<SyncPolicyWithColor> > sync_with_color_;
+    boost::shared_ptr<message_filters::Synchronizer<SyncPolicyWithPose> >
+      sync_with_pose_;
+    boost::shared_ptr<message_filters::Synchronizer<SyncPolicyWithColorAndPose> >
+      sync_with_color_and_pose_;
 
     ros::Publisher pub_camera_pose_;
     ros::Publisher pub_cloud_;

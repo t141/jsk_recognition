@@ -92,6 +92,7 @@ namespace jsk_pcl_ros
     pnh_->param<std::string>("fixed_frame_id", fixed_frame_id_, "odom_init");
     pnh_->param("n_textures", n_textures_, -1);
     pnh_->param("volume_size", volume_size_, pcl::device::kinfuLS::VOLUME_SIZE);
+    pnh_->param("use_pose", use_pose_, false);
 
     srv_ = boost::make_shared <dynamic_reconfigure::Server<Config> >(*pnh_);
     dynamic_reconfigure::Server<Config>::CallbackType f = boost::bind(&Kinfu::configCallback, this, _1, _2);
@@ -168,15 +169,40 @@ namespace jsk_pcl_ros
     if (integrate_color_)
     {
       sub_color_.subscribe(*pnh_, "input/color", 1);
-      sync_with_color_.reset(new message_filters::Synchronizer<SyncPolicyWithColor>(queue_size));
-      sync_with_color_->connectInput(sub_camera_info_, sub_depth_, sub_color_);
-      sync_with_color_->registerCallback(boost::bind(&Kinfu::update, this, _1, _2, _3));
+      if (use_pose_) {
+	sub_pose_.subscribe(*pnh_, "input/pose", 1);
+	sync_with_color_and_pose_.reset(
+	  new message_filters::Synchronizer<SyncPolicyWithColorAndPose>(queue_size)
+	);
+	sync_with_color_and_pose_->connectInput(
+	  sub_camera_info_, sub_depth_, sub_color_, sub_pose_
+	);
+	sync_with_color_and_pose_->registerCallback(
+	  boost::bind(&kinfu::update_with_pose, this, _1, _2, _3, _4)
+	);
+      } else {
+	sync_with_color_.reset(new message_filters::Synchronizer<SyncPolicyWithColor>(queue_size));
+	sync_with_color_->connectInput(sub_camera_info_, sub_depth_, sub_color_);
+	sync_with_color_->registerCallback(boost::bind(&Kinfu::update, this, _1, _2, _3));
+      }
     }
     else
     {
-      sync_.reset(new message_filters::Synchronizer<SyncPolicy>(queue_size));
-      sync_->connectInput(sub_camera_info_, sub_depth_);
-      sync_->registerCallback(boost::bind(&Kinfu::update, this, _1, _2));
+      if (use_pose_) {
+	sync_with_pose_.reset(
+	  new message_filters::Synchronizer<SyncPolicyWithPose>(queue_size)
+	);
+	sync_with_pose_->connectInput(
+	  sub_camera_info_, sub_depth_, sub_pose_
+	);
+	sync_->registerCallback(
+	  boost::bind(&Kinfu::update_with_pose, this, _1, _2, _3)
+	);
+      } else {
+	sync_.reset(new message_filters::Synchronizer<SyncPolicy>(queue_size));
+	sync_->connectInput(sub_camera_info_, sub_depth_);
+	sync_->registerCallback(boost::bind(&Kinfu::update, this, _1, _2));
+      }
     }
   }
 
@@ -451,6 +477,279 @@ namespace jsk_pcl_ros
     }
   }
 
+  void
+  Kinfu::update_with_pose(const sensor_msgs::CameraInfo::ConstPtr& caminfo_msg,
+			  const sensor_msgs::Image::ConstPtr& depth_msg,
+			  const geometry_msgs::PoseStamped::ConstPtr& pose_msg)
+  {
+    update(caminfo_msg, depth_msg, sensor_msgs::ImageConstPtr(), pose_msg);
+  }
+
+  void
+  Kinfu::update_with_pose(const sensor_msgs::CameraInfo::ConstPtr& caminfo_msg,
+			  const sensor_msgs::Image::ConstPtr& depth_msg,
+			  const sensor_msgs::Image::ConstPtr& color_msg,
+			  const geometry_msgs::PoseStamped::ConstPtr& pose_msg)
+  {
+    boost::mutex::scoped_lock lock(mutex_);
+
+    if ((depth_msg->height != caminfo_msg->height) || (depth_msg->width != caminfo_msg->width))
+    {
+      ROS_ERROR("Image size of input depth and camera info must be same. Depth: (%d, %d), Camera Info: (%d, %d)",
+                depth_msg->height, depth_msg->width, caminfo_msg->height, caminfo_msg->width);
+      return;
+    }
+    if (integrate_color_ && ((color_msg->height != caminfo_msg->height) || (color_msg->width != color_msg->width)))
+    {
+      ROS_ERROR("Image size of input color image and camera info must be same. Color: (%d, %d), Camera Info: (%d, %d)",
+                color_msg->height, color_msg->width, caminfo_msg->height, caminfo_msg->width);
+      return;
+    }
+
+    Eigen::Affine3f global_pose;
+    tf::PoseMsgToEigen(pose_msg, global_pose);
+    Eigen::Matrix<float, 3, 3, Eigen::RowMajor> global_rot = global_pose.rotation();
+    Eigen::Vector<float, 3> global_trans = global_pose.translation();
+
+    if (!kinfu_)
+    {
+      initKinfu(caminfo_msg);
+    }
+
+    // run kinfu
+    {
+      kinfu_->setDepthIntrinsics(/*fx=*/caminfo_msg->K[0], /*fy=*/caminfo_msg->K[4],
+                                 /*cx=*/caminfo_msg->K[2], /*cy=*/caminfo_msg->K[5]);
+
+      // depth: 32fc1 -> 16uc1
+      cv::Mat depth;
+      if (depth_msg->encoding == enc::TYPE_32FC1)
+      {
+        cv::Mat depth_32fc1 = cv_bridge::toCvShare(depth_msg, enc::TYPE_32FC1)->image;
+        depth_32fc1 *= 1000.;
+        depth_32fc1.convertTo(depth, CV_16UC1);
+      }
+      else if (depth_msg->encoding == enc::TYPE_16UC1)
+      {
+        depth = cv_bridge::toCvShare(depth_msg, enc::TYPE_16UC1)->image;
+      }
+      else
+      {
+        NODELET_FATAL("Unsupported depth image encoding: %s", depth_msg->encoding.c_str());
+        return;
+      }
+
+      // depth: cpu -> gpu
+      pcl::gpu::kinfuLS::KinfuTracker::DepthMap depth_device;
+      depth_device.upload(&(depth.data[0]), depth.cols * 2, depth.rows, depth.cols);
+
+
+      if (integrate_color_)
+      {
+        // color: cpu -> gpu
+        if (color_msg->encoding == enc::BGR8)
+        {
+          cv_bridge::CvImagePtr tmp_image_ptr_ = cv_bridge::toCvCopy(color_msg, enc::RGB8);
+          colors_device_.upload(&(tmp_image_ptr_->toImageMsg()->data[0]),
+                                color_msg->step, color_msg->height, color_msg->width);
+        }
+        else
+        {
+          colors_device_.upload(&(color_msg->data[0]), color_msg->step, color_msg->height, color_msg->width);
+        }
+
+        (*kinfu_)(depth_device, colors_device_, global_rot, global_trans);
+      }
+      else
+      {
+        (*kinfu_)(depth_device, global_rot, global_trans);
+      }
+      frame_idx_++;
+    }
+
+    jsk_recognition_msgs::TrackingStatus status;
+    status.header = caminfo_msg->header;
+    if (kinfu_->icpIsLost())
+    {
+      NODELET_FATAL_THROTTLE(10, "Tracking by ICP in kinect fusion is lost. auto_reset: %d", auto_reset_);
+      if (auto_reset_)
+      {
+        kinfu_.reset();
+        frame_idx_ = 0;
+        cameras_.clear();
+      }
+      status.is_lost = true;
+      pub_status_.publish(status);
+      return;
+    }
+    status.is_lost = false;
+    pub_status_.publish(status);
+
+    // save texture
+    if (integrate_color_ && (frame_idx_ % pcl::device::kinfuLS::SNAPSHOT_RATE == 1))
+    {
+      cv::Mat texture = cv_bridge::toCvCopy(color_msg, color_msg->encoding)->image;
+      if (color_msg->encoding == enc::RGB8)
+      {
+        cv::cvtColor(texture, texture, cv::COLOR_RGB2BGR);
+      }
+      textures_.push_back(texture);
+
+      pcl::TextureMapping<pcl::PointXYZ>::Camera camera;
+      camera.pose = kinfu_->getCameraPose();
+      camera.focal_length = caminfo_msg->K[0];  // must be equal to caminfo_msg->K[4]
+      camera.height = caminfo_msg->height;
+      camera.width = caminfo_msg->width;
+      cameras_.push_back(camera);
+    }
+
+    // publish kinfu origin and slam
+    {
+      Eigen::Affine3f camera_pose = kinfu_->getCameraPose();
+
+      // publish camera pose
+      if (pub_camera_pose_.getNumSubscribers() > 0)
+      {
+        geometry_msgs::PoseStamped camera_pose_msg;
+        tf::poseEigenToMsg(camera_pose, camera_pose_msg.pose);
+        camera_pose_msg.header.stamp = caminfo_msg->header.stamp;
+        camera_pose_msg.header.frame_id = "kinfu_origin";
+        pub_camera_pose_.publish(camera_pose_msg);
+      }
+
+      Eigen::Affine3f camera_to_kinfu_origin = camera_pose.inverse();
+      tf::Transform tf_camera_to_kinfu_origin;
+      tf::transformEigenToTF(camera_to_kinfu_origin, tf_camera_to_kinfu_origin);
+      tf_camera_to_kinfu_origin.setRotation(tf_camera_to_kinfu_origin.getRotation().normalized());
+      tf_broadcaster_.sendTransform(
+        tf::StampedTransform(tf_camera_to_kinfu_origin, caminfo_msg->header.stamp,
+                             caminfo_msg->header.frame_id, "kinfu_origin"));
+
+      if (slam_)
+      {
+        // use kinfu as slam, and publishes tf: map -> fixed_frame_id_ (usually odom_init)
+        try
+        {
+          tf::StampedTransform tf_odom_to_camera;
+          tf_listener_->lookupTransform(
+            fixed_frame_id_, caminfo_msg->header.frame_id, ros::Time(0), tf_odom_to_camera);
+          Eigen::Affine3f odom_to_camera;
+          tf::transformTFToEigen(tf_odom_to_camera, odom_to_camera);
+
+          if (frame_idx_ == 1)
+          {
+            odom_init_to_kinfu_origin_ = odom_to_camera * camera_to_kinfu_origin;
+          }
+
+          Eigen::Affine3f map_to_odom;
+          // map_to_odom * odom_to_camera * camera_to_kinfu_origin == odom_init_to_kinfu_origin_
+          map_to_odom = odom_init_to_kinfu_origin_ * (odom_to_camera * camera_to_kinfu_origin).inverse();
+          tf::StampedTransform tf_map_to_odom;
+          tf::transformEigenToTF(map_to_odom, tf_map_to_odom);
+          tf_map_to_odom.setRotation(tf_map_to_odom.getRotation().normalized());
+          tf_broadcaster_.sendTransform(
+            tf::StampedTransform(tf_map_to_odom, caminfo_msg->header.stamp, "map", fixed_frame_id_));
+        }
+        catch (tf::TransformException e)
+        {
+          NODELET_FATAL("%s", e.what());
+        }
+      }
+    }
+
+    // publish depth image
+    if (pub_depth_.getNumSubscribers() > 0)
+    {
+      pcl::gpu::kinfuLS::KinfuTracker::DepthMap depth_gpu;
+      Eigen::Affine3f camera_pose = kinfu_->getCameraPose();
+      if (!raycaster_)
+      {
+        raycaster_ = pcl::gpu::kinfuLS::RayCaster::Ptr(
+          new pcl::gpu::kinfuLS::RayCaster(
+            /*height=*/kinfu_->rows(), /*width=*/kinfu_->cols(),
+            /*fx=*/caminfo_msg->K[0], /*fy=*/caminfo_msg->K[4],
+            /*cx=*/caminfo_msg->K[2], /*cy=*/caminfo_msg->K[5]));
+      }
+      raycaster_->run(kinfu_->volume(), camera_pose, kinfu_->getCyclicalBufferStructure());
+      raycaster_->generateDepthImage(depth_gpu);
+
+      int cols;
+      std::vector<unsigned short> data;
+      depth_gpu.download(data, cols);
+
+      sensor_msgs::Image output_depth_msg;
+      sensor_msgs::fillImage(output_depth_msg,
+                             enc::TYPE_16UC1,
+                             depth_gpu.rows(),
+                             depth_gpu.cols(),
+                             depth_gpu.cols() * 2,
+                             reinterpret_cast<unsigned short*>(&data[0]));
+      output_depth_msg.header = caminfo_msg->header;
+      pub_depth_.publish(output_depth_msg);
+    }
+
+    // publish rendered image
+    if (pub_rendered_image_.getNumSubscribers() > 0)
+    {
+      pcl::gpu::kinfuLS::KinfuTracker::View view_device;
+      std::vector<pcl::gpu::kinfuLS::PixelRGB> view_host;
+      kinfu_->getImage(view_device);
+
+      if (integrate_color_)
+      {
+        pcl::gpu::kinfuLS::paint3DView(colors_device_, view_device);
+      }
+
+      int cols;
+      view_device.download(view_host, cols);
+
+      sensor_msgs::Image rendered_image_msg;
+      sensor_msgs::fillImage(rendered_image_msg,
+                             enc::RGB8,
+                             view_device.rows(),
+                             view_device.cols(),
+                             view_device.cols() * 3,
+                             reinterpret_cast<unsigned char*>(&view_host[0]));
+      rendered_image_msg.header = caminfo_msg->header;
+      pub_rendered_image_.publish(rendered_image_msg);
+    }
+
+    // publish cloud
+    if (pub_cloud_.getNumSubscribers() > 0)
+    {
+      pcl::gpu::DeviceArray<pcl::PointXYZ> cloud_buffer_device;
+      pcl::gpu::DeviceArray<pcl::PointXYZ> extracted = kinfu_->volume().fetchCloud(cloud_buffer_device);
+
+      pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_xyz(new pcl::PointCloud<pcl::PointXYZ>());
+      extracted.download(cloud_xyz->points);
+      cloud_xyz->width = static_cast<int>(cloud_xyz->points.size());
+      cloud_xyz->height = 1;
+
+      sensor_msgs::PointCloud2 output_cloud_msg;
+      if (integrate_color_)
+      {
+        pcl::gpu::DeviceArray<pcl::RGB> point_colors_device;
+        kinfu_->colorVolume().fetchColors(extracted, point_colors_device);
+
+        pcl::PointCloud<pcl::RGB>::Ptr cloud_rgb(new pcl::PointCloud<pcl::RGB>());
+        point_colors_device.download(cloud_rgb->points);
+        cloud_rgb->width = static_cast<int>(cloud_rgb->points.size());
+        cloud_rgb->height = 1;
+
+        pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZRGB>());
+        cloud->points.resize(cloud_xyz->width);
+        pcl::concatenateFields(*cloud_xyz, *cloud_rgb, *cloud);
+        pcl::toROSMsg(*cloud, output_cloud_msg);
+      }
+      else
+      {
+        pcl::toROSMsg(*cloud_xyz, output_cloud_msg);
+      }
+      output_cloud_msg.header.frame_id = "kinfu_origin";
+      pub_cloud_.publish(output_cloud_msg);
+    }
+  }
+  
   bool
   Kinfu::resetCallback(std_srvs::Empty::Request& req, std_srvs::Empty::Response& res)
   {
