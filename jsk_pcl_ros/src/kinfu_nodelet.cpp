@@ -46,6 +46,7 @@
 #include <jsk_recognition_utils/pcl_ros_util.h>
 #include <sensor_msgs/fill_image.h>
 #include <sensor_msgs/image_encodings.h>
+#include <eigen_conversions/eigen_msg.h>
 
 #include "jsk_pcl_ros/kinfu.h"
 
@@ -509,7 +510,7 @@ namespace jsk_pcl_ros
     Eigen::Affine3f global_pose;
     tf::PoseMsgToEigen(pose_msg, global_pose);
     Eigen::Matrix<float, 3, 3, Eigen::RowMajor> global_rot = global_pose.rotation();
-    Eigen::Vector<float, 3> global_trans = global_pose.translation();
+    Eigen::Vector3f global_trans = global_pose.translation();
 
     if (!kinfu_)
     {
