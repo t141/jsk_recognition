@@ -105,6 +105,17 @@ namespace jsk_pcl_ros
     void update(const sensor_msgs::CameraInfo::ConstPtr& caminfo_msg,
                 const sensor_msgs::Image::ConstPtr& depth_msg,
                 const sensor_msgs::Image::ConstPtr& rgb_msg);
+    void update_with_pose(
+      const sensor_msgs::CameraInfo::ConstPtr& caminfo_msg,
+      const sensor_msgs::Image::ConstPtr& depth_msg,
+      const geometry_msgs::PoseStamped::ConstPtr& pose_msg
+    );
+    void update_with_pose(
+      const sensor_msgs::CameraInfo::ConstPtr& caminfo_msg,
+      const sensor_msgs::Image::ConstPtr& depth_msg,
+      const sensor_msgs::Image::ConstPtr& rgb_msg,
+      const geometry_msgs::PoseStamped::ConstPtr& pose_msg
+    );
     bool resetCallback(std_srvs::Empty::Request& req, std_srvs::Empty::Response& res);
 
     boost::shared_ptr <dynamic_reconfigure::Server<Config> > srv_;
