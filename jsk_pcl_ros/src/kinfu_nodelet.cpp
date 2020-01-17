@@ -178,7 +178,7 @@ namespace jsk_pcl_ros
 	  sub_camera_info_, sub_depth_, sub_color_, sub_pose_
 	);
 	sync_with_color_and_pose_->registerCallback(
-	  boost::bind(&kinfu::update_with_pose, this, _1, _2, _3, _4)
+	  boost::bind(&Kinfu::update_with_pose, this, _1, _2, _3, _4)
 	);
       } else {
 	sync_with_color_.reset(new message_filters::Synchronizer<SyncPolicyWithColor>(queue_size));
