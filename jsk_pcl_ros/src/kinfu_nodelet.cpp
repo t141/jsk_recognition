@@ -483,7 +483,9 @@ namespace jsk_pcl_ros
 			  const sensor_msgs::Image::ConstPtr& depth_msg,
 			  const geometry_msgs::PoseStamped::ConstPtr& pose_msg)
   {
-    update(caminfo_msg, depth_msg, sensor_msgs::ImageConstPtr(), pose_msg);
+    update_with_pose(
+      caminfo_msg, depth_msg, sensor_msgs::ImageConstPtr(), pose_msg
+    );
   }
 
   void
@@ -508,7 +510,7 @@ namespace jsk_pcl_ros
     }
 
     Eigen::Affine3f global_pose;
-    tf::PoseMsgToEigen(pose_msg, global_pose);
+    tf::poseMsgToEigen(pose_msg, global_pose);
     Eigen::Matrix<float, 3, 3, Eigen::RowMajor> global_rot = global_pose.rotation();
     Eigen::Vector3f global_trans = global_pose.translation();
 
