@@ -196,7 +196,7 @@ namespace jsk_pcl_ros
 	sync_with_pose_->connectInput(
 	  sub_camera_info_, sub_depth_, sub_pose_
 	);
-	sync_->registerCallback(
+	sync_with_pose_->registerCallback(
 	  boost::bind(&Kinfu::update_with_pose, this, _1, _2, _3)
 	);
       } else {
