@@ -510,7 +510,7 @@ namespace jsk_pcl_ros
     }
 
     Eigen::Affine3f global_pose;
-    tf::poseMsgToEigen(*pose_msg, global_pose);
+    tf::poseMsgToEigen(pose_msg->pose, global_pose);
     Eigen::Matrix<float, 3, 3, Eigen::RowMajor> global_rot = global_pose.rotation();
     Eigen::Vector3f global_trans = global_pose.translation();
 
